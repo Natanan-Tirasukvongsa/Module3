@@ -145,6 +145,47 @@ float P2 = 0;
 float P3 = 0;
 float Distance_Traveled = 0;
 
+//Mai's part debug
+//quintic polynomial
+//requirement
+float angle_rad_start = 0; //rad
+float angle_rad_stop = 0; //rad
+float omega_max = 1; // 1 rad/s = 10 rpm
+float alpha_max = 0.5; // rad/s^2
+//find time duration for each viapoint
+float tau_max = 0; // sec
+uint64_t time_initial = 0; //initial time of each viapoint
+//coeffient parameter
+float c_0 = 0;
+float c_1 = 0;
+float c_2 = 0;
+float c_3 = 0;
+float c_4 = 0;
+float c_5 = 0;
+//parameter
+uint8_t initial = 1;
+uint64_t tau = 0; //sec
+//position control
+float desired_position = 0;
+float error_position = 0;
+float error_position_diff = 0;
+float error_position_int = 0;
+float error_position_prev = 0;
+float position_kp = 0;
+float position_ki = 0;
+float position_kd = 0;
+float position_bias = 0;
+//velocity control
+float desired_velocity = 0;
+float error_velocity = 0;
+float error_velocity_diff = 0;
+float error_velocity_int = 0;
+float error_velocity_prev = 0;
+float velocity_kp = 0;
+float velocity_ki = 0;
+float velocity_kd = 0;
+float velocity_bias = 0;
+
 
 //UART Protocol
 typedef struct _UartStructure
@@ -302,83 +343,174 @@ int main(void)
 	  if (micros() - Time_Velocity_Stamp >= 100)
 	  {
 		  Time_Velocity_Stamp = micros();
-		  Velocity_Read_Encoder = (Velocity_Read_Encoder*9999 + Encoder_Velocity_Update())/(float)10000;
+		  Velocity_Read_Encoder = (Velocity_Read_Encoder*9999 + Encoder_Velocity_Update())/(float)10000; //pulse per sec
 		  Velocity_Now_RPM = (Velocity_Read_Encoder*60)/Encoder_Resolution;	//Convert Velocity_Read_Encoder (Encoder's velocity at the moment) to RPM
 		  Velocity_Now_Rad = (Velocity_Now_RPM*2*pi)/60;
+
+		  //read position
+		  Position_Read_Encoder = htim1.Instance->CNT;
+		  Position_Now_Rad = (Position_Read_Encoder*2*pi)/Encoder_Resolution;  //rad
 	  }
 	  if (micros() - Time_Sampling_Stamp >= 1000)	  //Control loop
 	  {
 
 			Time_Sampling_Stamp = micros();
-			if(NO_KALMAN)
+
+			if (initial == 1 && angle_rad_stop - angle_rad_start != 0)
 			{
-				Position_Read_Encoder = htim1.Instance->CNT; //Read Encoder
-				Position_Now_Degree = (Position_Read_Encoder*360)/Encoder_Resolution; //Convert Encoder CNT to degree
-				NO_KALMAN=Prev_NO_KALMAN;
+				//calculate tau
+				//short if condition
+				tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrt(((10*pow(3+sqrt(3),1))-(5*pow(3+sqrt(3),2))+(5/9*pow(3+sqrt(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrt(((10*pow(3+sqrt(3),1))-(5*pow(3+sqrt(3),2))+(5/9*pow(3+sqrt(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max);
+				//calculate coeffient
+				c_0 = angle_rad_start;
+				c_1 = 0;
+				c_2 = 0;
+				c_3 = 10*((angle_rad_stop - angle_rad_start)/(pow(tau_max,3)));
+				c_4 = 15*((angle_rad_start - angle_rad_stop)/(pow(tau_max,4)));
+				c_5 = 6*((angle_rad_stop - angle_rad_start)/(pow(tau_max,5)));
+				//save initial time
+				//change microsec to second
+				time_initial = micros()/1000000.0;
+				initial = 0;
 			}
-			else
+			else if (initial == 0 &&  angle_rad_stop - angle_rad_start != 0)
 			{
-				if(NO_KALMAN!=Prev_NO_KALMAN)
+				//at the final point
+				//tau = (micros()/1000000.0)-time_initial ; in second unit
+				if ((micros()/1000000.0)-time_initial >= tau_max)
 				{
-					Position_Read_Encoder = htim1.Instance->CNT; //Read Encoder
-					Position_Now_Degree = (Position_Read_Encoder*360)/Encoder_Resolution; //Convert Encoder CNT to degree
-					Position_Kalman = Position_Now_Degree*pi/180;
+					initial = 1;
+					angle_rad_start = angle_rad_stop;
 				}
-
-				Kalman_Filter();
-				Position_Now_Rad = Position_Kalman;
-				Velocity_Now_Rad = Velocity_Kalman;
-				Position_Now_Degree = Position_Now_Rad*180/pi;
-			}
-
-
-		if ((Distance_Calculated == 0 )&& (Position_Now_Degree != Position_Want_Degree)) //Distance not calculated and not arrive at next station
-			{
-				Distance_Calculation();		//Calculate distance
-			}
-			else if ((Distance_Calculated == 1) && (Position_Now_Degree != Position_Want_Degree) && (Trajectory_Flag < 5)) //Distance calculated and not arrive at next station
-			{
-				Trajectory_Generation();	//Get Velocity_Want_RPM
-				Velocity_Control();
-				Motor_Drive_PWM();			//Drive
-
-				if(Trajectory_Flag == 4)
+				else //on going to final point
 				{
-					/*if(Distance_Length == 0)
+					//tau = real time - initial time (duration in second unit)
+					tau = micros()/1000000.0 - time_initial;
+					desired_position = c_0*pow(tau,0) + c_1*pow(tau,1) + c_2*pow(tau,2) + c_3*pow(tau,3) + c_4*pow(tau,4) + c_5*pow(tau,5);
+
+					//kalman filter
+
+					//position control
+					error_position = desired_position - Position_Now_Rad;
+					error_position_diff = (error_position - error_position_prev)*1000.0;
+					error_position_int = error_position_int + error_position/1000.0;
+					desired_velocity = position_kp*error_position + position_ki*error_position_int + position_kd*error_position_diff + position_bias;
+					error_position_prev = error_position;
+
+					//limitter velocity
+					if (desired_velocity > 1)
 					{
-						Trajectory_Flag = 5;
+						desired_velocity = 1;
 					}
-					else if (Distance_Length == 1)
+					else if (desired_velocity < -1)
 					{
-						Distance_Calculation();
-						Trajectory_Flag = 0;
-					}*/
+						desired_velocity = -1;
+					}
 
-					Trajectory_Flag = 5;
+					//velocity control
+					error_velocity = desired_velocity - Velocity_Now_Rad;
+					error_velocity_diff = (error_velocity - error_velocity_prev)*1000.0;
+					error_velocity_int = error_velocity_int + error_velocity/1000.0;
+					PWM_Out = velocity_kp*error_velocity + velocity_ki*error_velocity_int + velocity_kd*error_velocity_diff + velocity_bias;
+					error_velocity_prev = error_velocity;
+
+					//limitter pwm
+					if (PWM_Out > 10000)
+					{
+						PWM_Out = 10000;
+					}
+					else if (PWM_Out < -10000)
+					{
+						PWM_Out = -10000;
+					}
+
+					//control motor direction
+					if (PWM_Out < 0)
+					{
+						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, -PWM_Out);
+						HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_RESET);
+					}
+					else if (PWM_Out >= 0)
+					{
+						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, PWM_Out);
+						HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_SET);
+					}
 
 				}
-
-
 			}
 
 
-			if (Trajectory_Flag == 5)		//Reach next station
-			{
 
-				if (Position_Prev_Degree != Position_Want_Degree)	//Change goal
-				{
-					Trajectory_Flag = 0;	//Reset flag
-					Distance_Calculated = 0;//Reset distance
-					Velocity_Want_RPM = 0;  //Reset Velocity_Want_RPM
-					Velocity_Error_Sum = 0;
-				}
-				Velocity_Want_RPM = 0;
-				Velocity_Control();
-				PWM_Out = 0;
-				Motor_Drive_PWM();			//Drive
 
-			}
-			Position_Prev_Degree = Position_Want_Degree; //Check that Position_Want_Degree change or not
+//			if(NO_KALMAN)
+//			{
+//				Position_Read_Encoder = htim1.Instance->CNT; //Read Encoder
+//				Position_Now_Degree = (Position_Read_Encoder*360)/Encoder_Resolution; //Convert Encoder CNT to degree
+//				NO_KALMAN=Prev_NO_KALMAN;
+//			}
+//			else
+//			{
+//				if(NO_KALMAN!=Prev_NO_KALMAN)
+//				{
+//					Position_Read_Encoder = htim1.Instance->CNT; //Read Encoder
+//					Position_Now_Degree = (Position_Read_Encoder*360)/Encoder_Resolution; //Convert Encoder CNT to degree
+//					Position_Kalman = Position_Now_Degree*pi/180;
+//				}
+//
+//				Kalman_Filter();
+//				Position_Now_Rad = Position_Kalman;
+//				Velocity_Now_Rad = Velocity_Kalman;
+//				Position_Now_Degree = Position_Now_Rad*180/pi;
+//			}
+//
+//
+//		if ((Distance_Calculated == 0 )&& (Position_Now_Degree != Position_Want_Degree)) //Distance not calculated and not arrive at next station
+//			{
+//				Distance_Calculation();		//Calculate distance
+//			}
+//			else if ((Distance_Calculated == 1) && (Position_Now_Degree != Position_Want_Degree) && (Trajectory_Flag < 5)) //Distance calculated and not arrive at next station
+//			{
+//				Trajectory_Generation();	//Get Velocity_Want_RPM
+//				Velocity_Control();
+//				Motor_Drive_PWM();			//Drive
+//
+//				if(Trajectory_Flag == 4)
+//				{
+//					/*if(Distance_Length == 0)
+//					{
+//						Trajectory_Flag = 5;
+//					}
+//					else if (Distance_Length == 1)
+//					{
+//						Distance_Calculation();
+//						Trajectory_Flag = 0;
+//					}*/
+//
+//					Trajectory_Flag = 5;
+//
+//				}
+//
+//
+//			}
+//
+//
+//			if (Trajectory_Flag == 5)		//Reach next station
+//			{
+//
+//				if (Position_Prev_Degree != Position_Want_Degree)	//Change goal
+//				{
+//					Trajectory_Flag = 0;	//Reset flag
+//					Distance_Calculated = 0;//Reset distance
+//					Velocity_Want_RPM = 0;  //Reset Velocity_Want_RPM
+//					Velocity_Error_Sum = 0;
+//				}
+//				Velocity_Want_RPM = 0;
+//				Velocity_Control();
+//				PWM_Out = 0;
+//				Motor_Drive_PWM();			//Drive
+//
+//			}
+//			Position_Prev_Degree = Position_Want_Degree; //Check that Position_Want_Degree change or not
 
 
 
@@ -784,7 +916,7 @@ float Encoder_Velocity_Update()  //Lecture code DON'T TOUCH!
 	static uint64_t EncoderLastTimestamp = 0;
 
 	//read data
-	uint32_t EncoderNowPosition = htim1.Instance->CNT;
+	uint32_t EncoderNowPosition = htim1.Instance->CNT; //pulse
 	uint64_t EncoderNowTimestamp = micros();
 
 	int32_t EncoderPositionDiff;
@@ -837,6 +969,7 @@ void Motor_Drive_PWM()	//Motor drive
 		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_SET);
 	}
 }
+
 void Kalman_Filter()
 {
 	Q = powf(Sigma_a, 2);
@@ -862,6 +995,7 @@ void Kalman_Filter()
 	Position_Kalman = Position_Kalman_New;
 	Velocity_Kalman = Velocity_Kalman_New;
 }
+
 void Velocity_Control()  //Velocity Control PID
 {
 
