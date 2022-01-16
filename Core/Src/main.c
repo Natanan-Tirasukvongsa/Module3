@@ -36,7 +36,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define PWM_CHANNEL TIM_CHANNEL_4			//Set channel for PWM
+#define GPIO_PIN_DIRECTION GPIO_PIN_10		//Set pin for direction
 
 
 /* USER CODE END PD */
@@ -185,6 +186,23 @@ float velocity_kp = 0;
 float velocity_ki = 0;
 float velocity_kd = 0;
 float velocity_bias = 0;
+//kalman filter
+float theta_predict = 0;
+float omega_predict = 0;
+float theta_estimate = 0;
+float omega_estimate = 0;
+float p_predict11 = 0 ;
+float p_predict12 = 0 ;
+float p_predict21 = 0 ;
+float p_predict22 = 0 ;
+float p_estimate11 = 1 ;
+float p_estimate12 = 0 ;
+float p_estimate21 = 0 ;
+float p_estimate22 = 1 ;
+float z_predict = 0;
+float s = 0;
+float k11 = 0;
+float k21 = 0;
 
 
 //UART Protocol
@@ -360,7 +378,7 @@ int main(void)
 			{
 				//calculate tau
 				//short if condition
-				tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrt(((10*pow(3+sqrt(3),1))-(5*pow(3+sqrt(3),2))+(5/9*pow(3+sqrt(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrt(((10*pow(3+sqrt(3),1))-(5*pow(3+sqrt(3),2))+(5/9*pow(3+sqrt(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max);
+				tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrtf(((10*pow(3+sqrt(3),1))-(5*powf(3+sqrtf(3),2))+(5/9*powf(3+sqrtf(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrtf(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5/9*powf(3+sqrtf(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max);
 				//calculate coeffient
 				c_0 = angle_rad_start;
 				c_1 = 0;
@@ -372,6 +390,11 @@ int main(void)
 				//change microsec to second
 				time_initial = micros()/1000000.0;
 				initial = 0;
+
+				//initial parameter in kalman filter
+				theta_estimate = desired_position;
+				omega_estimate = 0;
+
 			}
 			else if (initial == 0 &&  angle_rad_stop - angle_rad_start != 0)
 			{
@@ -386,9 +409,58 @@ int main(void)
 				{
 					//tau = real time - initial time (duration in second unit)
 					tau = micros()/1000000.0 - time_initial;
-					desired_position = c_0*pow(tau,0) + c_1*pow(tau,1) + c_2*pow(tau,2) + c_3*pow(tau,3) + c_4*pow(tau,4) + c_5*pow(tau,5);
+					desired_position = c_0*powf(tau,0) + c_1*powf(tau,1) + c_2*powf(tau,2) + c_3*powf(tau,3) + c_4*powf(tau,4) + c_5*powf(tau,5);
 
 					//kalman filter
+					//predict state
+					//x_predict = A*x_estimate
+					//x_predict = [theta_predict; omega_predict]
+					//A = [1 dt; 0 1]
+					//x_estimate = [theta_estimate; omega_estimate]
+					theta_predict = theta_estimate + omega_estimate*CON_T;
+					omega_predict = omega_estimate;
+
+					//p_predict = A*p_estimate*transpose(A) + G*Q*transpose(G)
+					//p_predict = [p_predict11 p_predict12 ; p_predict21 p_predict22]
+					//p_estimate = [p_estimate11 p_estimate12 ; p_estimate21 p_estimate22] -> initial [1 0; 0 1]
+					//G = [0.5*dt^2 ; dt]
+					//Q = Sigma_a^2
+					Q = powf(Sigma_a,2);
+					p_predict11 = p_estimate11 + (p_estimate12 + p_estimate21)*CON_T + p_estimate22*powf(CON_T,2)+powf(CON_T,4)*Q/4.0;
+					p_predict12 = p_estimate12 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
+					p_predict21 = p_estimate21 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
+					p_predict22 = p_estimate22 + powf(CON_T,2)*Q;
+
+					//update
+					//z_predict = z - C*x_predict
+					//z_predict = theta_error
+					//z = sensor_theta_input
+					//C = [1 0]
+					z_predict = Position_Now_Rad - theta_predict;
+
+					//S = C*p_predict*transpose(C) + R
+					//R = Sigma_w^2
+					R = powf(Sigma_w,2);
+					s = p_predict11 + R;
+
+					//K = p_predict*transpose(C)*inv(S)
+					//K = [k11;k21]
+					k11 = p_predict11/s;
+					k21 = p_predict21/s;
+
+					//x_estimate = x_predict + K*z_predict
+					theta_estimate = theta_predict + k11*z_predict;
+					omega_estimate = omega_predict + k21*z_predict;
+
+					//p_estimate = (I - K*C)*p_predict
+					//I = [1 0; 0 1]
+					p_estimate11 = k11*R;
+					p_estimate12 = p_predict12*R/s;
+					p_estimate21 = -k21*p_predict11 + p_predict21;
+					p_estimate22 = p_predict22 - k21*p_predict12;
+
+					//use estimate theta
+					Position_Now_Rad = theta_estimate;
 
 					//position control
 					error_position = desired_position - Position_Now_Rad;
