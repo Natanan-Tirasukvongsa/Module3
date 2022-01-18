@@ -358,7 +358,7 @@ int main(void)
 
 	  	}
 
-	  if (micros() - Time_Velocity_Stamp >= 100)
+	  if (micros() - Time_Velocity_Stamp >= 100) //measurement
 	  {
 		  Time_Velocity_Stamp = micros();
 		  Velocity_Read_Encoder = (Velocity_Read_Encoder*9999 + Encoder_Velocity_Update())/(float)10000; //pulse per sec
@@ -369,12 +369,13 @@ int main(void)
 		  Position_Read_Encoder = htim1.Instance->CNT;
 		  Position_Now_Rad = (Position_Read_Encoder*2*pi)/Encoder_Resolution;  //rad
 	  }
+
 	  if (micros() - Time_Sampling_Stamp >= 1000)	  //Control loop
 	  {
 
 			Time_Sampling_Stamp = micros();
 
-			if (initial == 1 && angle_rad_stop - angle_rad_start != 0)
+			if (initial == 1 && abs(angle_rad_stop - angle_rad_start) != 0)
 			{
 				//calculate tau
 				//short if condition
@@ -394,9 +395,13 @@ int main(void)
 				//initial parameter in kalman filter
 				theta_estimate = desired_position;
 				omega_estimate = 0;
+				p_estimate11 = 1 ;
+				p_estimate12 = 0 ;
+				p_estimate21 = 0 ;
+				p_estimate22 = 1 ;
 
 			}
-			else if (initial == 0 &&  angle_rad_stop - angle_rad_start != 0)
+			else if (initial == 0 &&  abs(angle_rad_stop - angle_rad_start) != 0)
 			{
 				//at the final point
 				//tau = (micros()/1000000.0)-time_initial ; in second unit
