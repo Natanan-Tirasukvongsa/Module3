@@ -90,6 +90,7 @@ float Velocity_Error_Sum = 0;		//Sum of Velocity_Error that will be use in integ
 float Velocity_Error_Diff = 0;		//Difference of Velocity_Error and Velocity_Error_Prev that will be use in differential part of "Velocity_Control()"
 float Velocity_Error_Prev = 0;		//last Velocity_Error
 int16_t PWM_Out = 0;				//PWM for motor
+int16_t PWM_Out_Pre = 0;
 
 //Position Control
 float Position_Read_Encoder = 0;  		//Encoder's now position in CNT
@@ -155,7 +156,7 @@ float omega_max = 1; // 1 rad/s = 10 rpm
 float alpha_max = 0.5; // rad/s^2
 //find time duration for each viapoint
 float tau_max = 0; // sec
-uint64_t time_initial = 0; //initial time of each viapoint
+float time_initial = 0; //initial time of each viapoint
 //coeffient parameter
 float c_0 = 0;
 float c_1 = 0;
@@ -165,26 +166,27 @@ float c_4 = 0;
 float c_5 = 0;
 //parameter
 uint8_t initial = 1;
-uint64_t tau = 0; //sec
+float tau = 0; //sec
 //position control
 float desired_position = 0;
 float error_position = 0;
 float error_position_diff = 0;
 float error_position_int = 0;
 float error_position_prev = 0;
-float position_kp = 0;
+float position_kp = 1;
 float position_ki = 0;
 float position_kd = 0;
 float position_bias = 0;
 //velocity control
+float command_velocity = 0;
 float desired_velocity = 0;
 float error_velocity = 0;
 float error_velocity_diff = 0;
 float error_velocity_int = 0;
 float error_velocity_prev = 0;
-float velocity_kp = 0;
-float velocity_ki = 0;
-float velocity_kd = 0;
+float velocity_kp = 9000;
+float velocity_ki = 8000;
+float velocity_kd = 10;
 float velocity_bias = 0;
 //kalman filter
 float theta_predict = 0;
@@ -333,11 +335,13 @@ int main(void)
   HAL_TIM_Base_Start(&htim3);						//Start TIM3
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_4);			//Start PWM TIM3
 
+
   UART2.huart = &huart2;
   UART2.RxLen = 255;
   UART2.TxLen = 255;
   UARTInit(&UART2);
   UARTResetStart(&UART2);
+
 
   /* USER CODE END 2 */
 
@@ -372,28 +376,42 @@ int main(void)
 
 	  if (micros() - Time_Sampling_Stamp >= 1000)	  //Control loop
 	  {
-
+		  	PWM_Out_Pre = PWM_Out;
 			Time_Sampling_Stamp = micros();
 
-			if (initial == 1 && abs(angle_rad_stop - angle_rad_start) != 0)
+			if (initial == 1 && angle_rad_stop - angle_rad_start != 0)
 			{
 				//calculate tau
 				//short if condition
-				tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrtf(((10*pow(3+sqrt(3),1))-(5*powf(3+sqrtf(3),2))+(5/9*powf(3+sqrtf(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrtf(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5/9*powf(3+sqrtf(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max);
+				tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max)) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max));
+//				if (15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrt(((10*pow(3+sqrt(3),1))-(5*pow(3+sqrt(3),2))+(5/9*pow(3+sqrt(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max))
+//				{
+//					tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max;
+//				}
+//				else
+//				{
+//					tau_max = sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5/9*powf(3+sqrtf(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max));
+//				}
+
+
+				//debug
+				//problem is maybe sqrt / sqrtf
+//				tau_max = 10;
+
 				//calculate coeffient
 				c_0 = angle_rad_start;
 				c_1 = 0;
 				c_2 = 0;
-				c_3 = 10*((angle_rad_stop - angle_rad_start)/(pow(tau_max,3)));
-				c_4 = 15*((angle_rad_start - angle_rad_stop)/(pow(tau_max,4)));
-				c_5 = 6*((angle_rad_stop - angle_rad_start)/(pow(tau_max,5)));
+				c_3 = 10*((angle_rad_stop - angle_rad_start)/(powf(tau_max,3)));
+				c_4 = 15*((angle_rad_start - angle_rad_stop)/(powf(tau_max,4)));
+				c_5 = 6*((angle_rad_stop - angle_rad_start)/(powf(tau_max,5)));
 				//save initial time
 				//change microsec to second
 				time_initial = micros()/1000000.0;
 				initial = 0;
 
 				//initial parameter in kalman filter
-				theta_estimate = desired_position;
+				theta_estimate = angle_rad_start;
 				omega_estimate = 0;
 				p_estimate11 = 1 ;
 				p_estimate12 = 0 ;
@@ -401,7 +419,7 @@ int main(void)
 				p_estimate22 = 1 ;
 
 			}
-			else if (initial == 0 &&  abs(angle_rad_stop - angle_rad_start) != 0)
+			else if (initial == 0 && angle_rad_stop - angle_rad_start != 0)
 			{
 				//at the final point
 				//tau = (micros()/1000000.0)-time_initial ; in second unit
@@ -409,12 +427,22 @@ int main(void)
 				{
 					initial = 1;
 					angle_rad_start = angle_rad_stop;
+					__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, 0);
+					error_position = 0;
+					error_position_diff = 0;
+					error_position_int = 0;
+					error_position_prev = 0;
+					error_velocity = 0;
+					error_velocity_diff = 0;
+					error_velocity_int = 0;
+					error_velocity_prev = 0;
 				}
 				else //on going to final point
 				{
 					//tau = real time - initial time (duration in second unit)
 					tau = micros()/1000000.0 - time_initial;
 					desired_position = c_0*powf(tau,0) + c_1*powf(tau,1) + c_2*powf(tau,2) + c_3*powf(tau,3) + c_4*powf(tau,4) + c_5*powf(tau,5);
+					desired_velocity = 0 + c_1 + 2*c_2*powf(tau,1) + 3*c_3*powf(tau,2) + 4*c_4*powf(tau,3) + 5*c_5*powf(tau,4);
 
 					//kalman filter
 					//predict state
@@ -440,18 +468,18 @@ int main(void)
 					//z_predict = z - C*x_predict
 					//z_predict = theta_error
 					//z = sensor_theta_input
-					//C = [1 0]
-					z_predict = Position_Now_Rad - theta_predict;
+					//C = [0 1]
+					z_predict = Velocity_Now_Rad - omega_predict;
 
 					//S = C*p_predict*transpose(C) + R
 					//R = Sigma_w^2
 					R = powf(Sigma_w,2);
-					s = p_predict11 + R;
+					s = p_predict22 + R;
 
 					//K = p_predict*transpose(C)*inv(S)
 					//K = [k11;k21]
-					k11 = p_predict11/s;
-					k21 = p_predict21/s;
+					k11 = p_predict12/s;
+					k21 = p_predict22/s;
 
 					//x_estimate = x_predict + K*z_predict
 					theta_estimate = theta_predict + k11*z_predict;
@@ -459,38 +487,48 @@ int main(void)
 
 					//p_estimate = (I - K*C)*p_predict
 					//I = [1 0; 0 1]
-					p_estimate11 = k11*R;
+					p_estimate11 = (p_predict11*(p_predict22+R)-p_predict12*p_predict21)/s;
 					p_estimate12 = p_predict12*R/s;
-					p_estimate21 = -k21*p_predict11 + p_predict21;
-					p_estimate22 = p_predict22 - k21*p_predict12;
+					p_estimate21 = p_predict21*R/s;
+					p_estimate22 = p_predict22*R/s;
 
 					//use estimate theta
-					Position_Now_Rad = theta_estimate;
 
 					//position control
 					error_position = desired_position - Position_Now_Rad;
 					error_position_diff = (error_position - error_position_prev)*1000.0;
 					error_position_int = error_position_int + error_position/1000.0;
-					desired_velocity = position_kp*error_position + position_ki*error_position_int + position_kd*error_position_diff + position_bias;
+					command_velocity = position_kp*error_position + position_ki*error_position_int + position_kd*error_position_diff + position_bias;
 					error_position_prev = error_position;
 
-					//limitter velocity
-					if (desired_velocity > 1)
+//					limitter velocity
+					if (command_velocity > 1)
 					{
-						desired_velocity = 1;
+						command_velocity = 1;
 					}
-					else if (desired_velocity < -1)
+					else if (command_velocity < -1)
 					{
-						desired_velocity = -1;
+						command_velocity = -1;
 					}
 
 					//velocity control
-					error_velocity = desired_velocity - Velocity_Now_Rad;
+					error_velocity = desired_velocity - omega_estimate + command_velocity;
 					error_velocity_diff = (error_velocity - error_velocity_prev)*1000.0;
 					error_velocity_int = error_velocity_int + error_velocity/1000.0;
 					PWM_Out = velocity_kp*error_velocity + velocity_ki*error_velocity_int + velocity_kd*error_velocity_diff + velocity_bias;
 					error_velocity_prev = error_velocity;
 
+//					if ((PWM_Out > 200) || (PWM_Out < -200) )
+//					{
+//						if (PWM_Out > PWM_Out_Pre + 5)
+//						{
+//							PWM_Out = PWM_Out_Pre + 5;
+//						}
+//						else if (PWM_Out < PWM_Out_Pre - 5)
+//						{
+//							PWM_Out = PWM_Out_Pre - 5;
+//						}
+//					}
 					//limitter pwm
 					if (PWM_Out > 10000)
 					{
@@ -501,15 +539,27 @@ int main(void)
 						PWM_Out = -10000;
 					}
 
+//					if (tau < tau_max/2)
+//					{
+//						if (PWM_Out < 0)
+//						{
+//							PWM_Out = -PWM_Out;
+//						}
+//					}
+
+
+
 					//control motor direction
-					if (PWM_Out < 0)
+					//if (PWM_Out < 0)
+					if (angle_rad_start > angle_rad_stop)
 					{
-						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, -PWM_Out);
+						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
 						HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_RESET);
 					}
-					else if (PWM_Out >= 0)
+//					else if (PWM_Out >= 0)
+					else
 					{
-						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, PWM_Out);
+						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
 						HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_SET);
 					}
 
@@ -1006,10 +1056,12 @@ float Encoder_Velocity_Update()  //Lecture code DON'T TOUCH!
 	if (EncoderPositionDiff >= Encoder_Overflow)
 	{
 		EncoderPositionDiff -= Encoder_Resolution;
+		//EncoderPositionDiff -= 57344;
 	}
 	else if (-EncoderPositionDiff >= Encoder_Overflow)
 	{
 		EncoderPositionDiff += Encoder_Resolution;
+		//EncoderPositionDiff += 57344;
 	}
 
 	//Update Position and time
