@@ -205,6 +205,33 @@ float z_predict = 0;
 float s = 0;
 float k11 = 0;
 float k21 = 0;
+uint64_t Prox_Delay = 0;
+uint64_t Time_Delay = 0;
+int i = 0;
+int j = 0;
+uint16_t Delay = 0;
+//set home
+int set_home_state = 0; //set home first
+GPIO_PinState Proximity[2]; //save proximity state
+int set_home_finished = 0; //already to control
+float save_angle = 0; //sae angle that proximity detects robot arm
+int find_proximity = 0;
+uint8_t STATE_DISPLAY = 0;
+uint8_t previous_state = 0;
+uint8_t clear_counter_velocity = 0;
+uint8_t clear_counter_position = 0;
+enum State_Display{
+//	SetHome_180_1 = 0,
+//	SetHome_180_2,
+//	Quintic,
+//	Go_to_proximity,
+
+	FindPorximity = 0,
+	FoundProximity,
+	GotoProximity,
+	QinticStaff,
+	QinticFinish,
+};
 
 
 //UART Protocol
@@ -287,6 +314,12 @@ void UARTTxWrite(UARTStucrture *uart, uint8_t *pData, uint16_t len);
 void UART_Protocol(UARTStucrture *uart, int16_t dataIn);
 void UART_Do_Command();
 
+//Mai function
+void cascade_control_with_feed_forward();
+void quintic();
+float Encoder_Position_Update();	//Read Encoder position unwrap
+
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -366,12 +399,14 @@ int main(void)
 	  {
 		  Time_Velocity_Stamp = micros();
 		  Velocity_Read_Encoder = (Velocity_Read_Encoder*9999 + Encoder_Velocity_Update())/(float)10000; //pulse per sec
+//		  Velocity_Read_Encoder = Encoder_Velocity_Update();
 		  Velocity_Now_RPM = (Velocity_Read_Encoder*60)/Encoder_Resolution;	//Convert Velocity_Read_Encoder (Encoder's velocity at the moment) to RPM
 		  Velocity_Now_Rad = (Velocity_Now_RPM*2*pi)/60;
 
 		  //read position
-		  Position_Read_Encoder = htim1.Instance->CNT;
-		  Position_Now_Rad = (Position_Read_Encoder*2*pi)/Encoder_Resolution;  //rad
+//		  Position_Read_Encoder = htim1.Instance->CNT;
+		  Position_Read_Encoder = Encoder_Position_Update();
+		  Position_Now_Rad = (Position_Read_Encoder*2*M_PI)/Encoder_Resolution;  //rad
 	  }
 
 	  if (micros() - Time_Sampling_Stamp >= 1000)	  //Control loop
@@ -379,194 +414,294 @@ int main(void)
 		  	PWM_Out_Pre = PWM_Out;
 			Time_Sampling_Stamp = micros();
 
-			if (initial == 1 && angle_rad_stop - angle_rad_start != 0)
+			//frang code set home
+			Proximity[0] = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1);
+			if (set_home_finished == 0)
 			{
-				//calculate tau
-				//short if condition
-				tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max)) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max));
-//				if (15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrt(((10*pow(3+sqrt(3),1))-(5*pow(3+sqrt(3),2))+(5/9*pow(3+sqrt(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max))
-//				{
-//					tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max;
-//				}
-//				else
-//				{
-//					tau_max = sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5/9*powf(3+sqrtf(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max));
-//				}
+				switch (STATE_DISPLAY) {
 
-
-				//debug
-				//problem is maybe sqrt / sqrtf
-//				tau_max = 10;
-
-				//calculate coeffient
-				c_0 = angle_rad_start;
-				c_1 = 0;
-				c_2 = 0;
-				c_3 = 10*((angle_rad_stop - angle_rad_start)/(powf(tau_max,3)));
-				c_4 = 15*((angle_rad_start - angle_rad_stop)/(powf(tau_max,4)));
-				c_5 = 6*((angle_rad_stop - angle_rad_start)/(powf(tau_max,5)));
-				//save initial time
-				//change microsec to second
-				time_initial = micros()/1000000.0;
-				initial = 0;
-
-				//initial parameter in kalman filter
-				theta_estimate = angle_rad_start;
-				omega_estimate = 0;
-				p_estimate11 = 1 ;
-				p_estimate12 = 0 ;
-				p_estimate21 = 0 ;
-				p_estimate22 = 1 ;
-
-			}
-			else if (initial == 0 && angle_rad_stop - angle_rad_start != 0)
-			{
-				//at the final point
-				//tau = (micros()/1000000.0)-time_initial ; in second unit
-				if ((micros()/1000000.0)-time_initial >= tau_max)
-				{
-					initial = 1;
-					angle_rad_start = angle_rad_stop;
-					__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, 0);
-					error_position = 0;
-					error_position_diff = 0;
-					error_position_int = 0;
-					error_position_prev = 0;
-					error_velocity = 0;
-					error_velocity_diff = 0;
-					error_velocity_int = 0;
-					error_velocity_prev = 0;
-				}
-				else //on going to final point
-				{
-					//tau = real time - initial time (duration in second unit)
-					tau = micros()/1000000.0 - time_initial;
-					desired_position = c_0*powf(tau,0) + c_1*powf(tau,1) + c_2*powf(tau,2) + c_3*powf(tau,3) + c_4*powf(tau,4) + c_5*powf(tau,5);
-					desired_velocity = 0 + c_1 + 2*c_2*powf(tau,1) + 3*c_3*powf(tau,2) + 4*c_4*powf(tau,3) + 5*c_5*powf(tau,4);
-
-					//kalman filter
-					//predict state
-					//x_predict = A*x_estimate
-					//x_predict = [theta_predict; omega_predict]
-					//A = [1 dt; 0 1]
-					//x_estimate = [theta_estimate; omega_estimate]
-					theta_predict = theta_estimate + omega_estimate*CON_T;
-					omega_predict = omega_estimate;
-
-					//p_predict = A*p_estimate*transpose(A) + G*Q*transpose(G)
-					//p_predict = [p_predict11 p_predict12 ; p_predict21 p_predict22]
-					//p_estimate = [p_estimate11 p_estimate12 ; p_estimate21 p_estimate22] -> initial [1 0; 0 1]
-					//G = [0.5*dt^2 ; dt]
-					//Q = Sigma_a^2
-					Q = powf(Sigma_a,2);
-					p_predict11 = p_estimate11 + (p_estimate12 + p_estimate21)*CON_T + p_estimate22*powf(CON_T,2)+powf(CON_T,4)*Q/4.0;
-					p_predict12 = p_estimate12 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
-					p_predict21 = p_estimate21 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
-					p_predict22 = p_estimate22 + powf(CON_T,2)*Q;
-
-					//update
-					//z_predict = z - C*x_predict
-					//z_predict = theta_error
-					//z = sensor_theta_input
-					//C = [0 1]
-					z_predict = Velocity_Now_Rad - omega_predict;
-
-					//S = C*p_predict*transpose(C) + R
-					//R = Sigma_w^2
-					R = powf(Sigma_w,2);
-					s = p_predict22 + R;
-
-					//K = p_predict*transpose(C)*inv(S)
-					//K = [k11;k21]
-					k11 = p_predict12/s;
-					k21 = p_predict22/s;
-
-					//x_estimate = x_predict + K*z_predict
-					theta_estimate = theta_predict + k11*z_predict;
-					omega_estimate = omega_predict + k21*z_predict;
-
-					//p_estimate = (I - K*C)*p_predict
-					//I = [1 0; 0 1]
-					p_estimate11 = (p_predict11*(p_predict22+R)-p_predict12*p_predict21)/s;
-					p_estimate12 = p_predict12*R/s;
-					p_estimate21 = p_predict21*R/s;
-					p_estimate22 = p_predict22*R/s;
-
-					//use estimate theta
-
-					//position control
-					error_position = desired_position - Position_Now_Rad;
-					error_position_diff = (error_position - error_position_prev)*1000.0;
-					error_position_int = error_position_int + error_position/1000.0;
-					command_velocity = position_kp*error_position + position_ki*error_position_int + position_kd*error_position_diff + position_bias;
-					error_position_prev = error_position;
-
-//					limitter velocity
-					if (command_velocity > 1)
-					{
-						command_velocity = 1;
-					}
-					else if (command_velocity < -1)
-					{
-						command_velocity = -1;
-					}
-
-					//velocity control
-					error_velocity = desired_velocity - omega_estimate + command_velocity;
-					error_velocity_diff = (error_velocity - error_velocity_prev)*1000.0;
-					error_velocity_int = error_velocity_int + error_velocity/1000.0;
-					PWM_Out = velocity_kp*error_velocity + velocity_ki*error_velocity_int + velocity_kd*error_velocity_diff + velocity_bias;
-					error_velocity_prev = error_velocity;
-
-//					if ((PWM_Out > 200) || (PWM_Out < -200) )
-//					{
-//						if (PWM_Out > PWM_Out_Pre + 5)
-//						{
-//							PWM_Out = PWM_Out_Pre + 5;
-//						}
-//						else if (PWM_Out < PWM_Out_Pre - 5)
-//						{
-//							PWM_Out = PWM_Out_Pre - 5;
-//						}
-//					}
-					//limitter pwm
-					if (PWM_Out > 10000)
-					{
-						PWM_Out = 10000;
-					}
-					else if (PWM_Out < -10000)
-					{
-						PWM_Out = -10000;
-					}
-
-//					if (tau < tau_max/2)
-//					{
-//						if (PWM_Out < 0)
-//						{
-//							PWM_Out = -PWM_Out;
-//						}
-//					}
-
-
-
-					//control motor direction
-					//if (PWM_Out < 0)
-					if (angle_rad_start > angle_rad_stop)
-					{
-						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
-						HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_RESET);
-					}
-//					else if (PWM_Out >= 0)
-					else
-					{
+					case FindPorximity:
+						PWM_Out = 5000;
 						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
 						HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_SET);
-					}
+						if (Proximity[0] == GPIO_PIN_SET && Proximity[1] == GPIO_PIN_RESET) //if not set home & proximity detects robot arm
+						{
+							find_proximity = 1;
+							save_angle = Position_Now_Rad; //save angle that proximity detect robot arm
+							Time_Delay = micros();
+							Prox_Delay = micros();
+							STATE_DISPLAY = FoundProximity;
+						}
+						break;
+					case FoundProximity:
+						if(micros() - Time_Delay >= 1000000){
+							Time_Delay = micros();
+							for ( i = 0; i < 8; ++i) {
+									PWM_Out = 3*PWM_Out/4;
+									__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
+							}
+						}
 
+						if(i == 8){
+//							angle_rad_start = Position_Now_Rad;
+//							angle_rad_stop = Position_Now_Rad + M_PI/4;
+							if (micros() - Prox_Delay >= 500000){
+								Prox_Delay = micros();
+								Delay += 1;
+							}
+							if(Delay >= 2){
+								STATE_DISPLAY = GotoProximity;
+							}
+
+						}
+						break;
+					case GotoProximity:
+						angle_rad_start = Position_Now_Rad;
+						angle_rad_stop = save_angle;
+						STATE_DISPLAY = QinticFinish;
+						break;
+					case QinticStaff:
+						i = 0;
+						j=0;
+						quintic();
+						if (initial == 1){
+							if (micros() - Prox_Delay >= 500000){
+								Prox_Delay = micros();
+								Delay += 1;
+							}
+							if(Delay >= 5){
+								STATE_DISPLAY = GotoProximity;
+							}
+						}
+
+						break;
+					case QinticFinish:
+						quintic();
+						if (initial == 1){
+							if (micros()/1000000.0 - time_initial >= tau_max + 2)
+							{
+								Prox_Delay = micros();
+								set_home_finished = 1;
+								angle_rad_start = 0;
+								angle_rad_stop = 0;
+								htim1.Instance->CNT = 0;
+								Position_Now_Rad = 0;
+								clear_counter_position = 1;
+								clear_counter_velocity = 1;
+							}
+
+
+						}
+						break;
+					default:
+						break;
 				}
 			}
 
+			if (set_home_finished == 1)
+			{
+				if (initial == 1 && angle_rad_stop - angle_rad_start != 0)
+				{
+					//calculate tau
+					//short if condition
+					tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max)) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max));
+				//	if (15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrt(((10*pow(3+sqrt(3),1))-(5*pow(3+sqrt(3),2))+(5/9*pow(3+sqrt(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max))
+				//	{
+				//		tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max;
+				//	}
+				//	else
+				//	{
+				//		tau_max = sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5/9*powf(3+sqrtf(3),3)))*(angle_rad_stop-angle_rad_start)/alpha_max));
+				//	}
 
+
+					//debug
+					//problem is maybe sqrt / sqrtf
+				//	tau_max = 10;
+
+					//calculate coeffient
+					c_0 = angle_rad_start;
+					c_1 = 0;
+					c_2 = 0;
+					c_3 = 10*((angle_rad_stop - angle_rad_start)/(powf(tau_max,3)));
+					c_4 = 15*((angle_rad_start - angle_rad_stop)/(powf(tau_max,4)));
+					c_5 = 6*((angle_rad_stop - angle_rad_start)/(powf(tau_max,5)));
+					//save initial time
+					//change microsec to second
+					time_initial = micros()/1000000.0;
+					initial = 0;
+
+					//initial parameter in kalman filter
+					theta_estimate = angle_rad_start;
+					omega_estimate = 0;
+					p_estimate11 = 1 ;
+					p_estimate12 = 0 ;
+					p_estimate21 = 0 ;
+					p_estimate22 = 1 ;
+
+				}
+				if (initial == 0 && angle_rad_stop - angle_rad_start != 0 )
+				{
+					//at the final point
+					//tau = (micros()/1000000.0)-time_initial ; in second unit
+					if ((micros()/1000000.0)-time_initial >= tau_max)
+					{
+						initial = 1;
+						angle_rad_start = angle_rad_stop;
+						PWM_Out = 0;
+						__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, PWM_Out);
+						error_position = 0;
+						error_position_diff = 0;
+						error_position_int = 0;
+						error_position_prev = 0;
+						error_velocity = 0;
+						error_velocity_diff = 0;
+						error_velocity_int = 0;
+						error_velocity_prev = 0;
+					}
+					else //on going to final point
+					{
+						//tau = real time - initial time (duration in second unit)
+						tau = micros()/1000000.0 - time_initial;
+						desired_position = c_0*powf(tau,0) + c_1*powf(tau,1) + c_2*powf(tau,2) + c_3*powf(tau,3) + c_4*powf(tau,4) + c_5*powf(tau,5);
+						desired_velocity = 0 + c_1 + 2*c_2*powf(tau,1) + 3*c_3*powf(tau,2) + 4*c_4*powf(tau,3) + 5*c_5*powf(tau,4);
+
+						//kalman filter
+						//predict state
+						//x_predict = A*x_estimate
+						//x_predict = [theta_predict; omega_predict]
+						//A = [1 dt; 0 1]
+						//x_estimate = [theta_estimate; omega_estimate]
+						theta_predict = theta_estimate + omega_estimate*CON_T;
+						omega_predict = omega_estimate;
+						//p_predict = A*p_estimate*transpose(A) + G*Q*transpose(G)
+						//p_predict = [p_predict11 p_predict12 ; p_predict21 p_predict22]
+						//p_estimate = [p_estimate11 p_estimate12 ; p_estimate21 p_estimate22] -> initial [1 0; 0 1]
+						//G = [0.5*dt^2 ; dt]
+						//Q = Sigma_a^2
+						Q = powf(Sigma_a,2);
+						p_predict11 = p_estimate11 + (p_estimate12 + p_estimate21)*CON_T + p_estimate22*powf(CON_T,2)+powf(CON_T,4)*Q/4.0;
+						p_predict12 = p_estimate12 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
+						p_predict21 = p_estimate21 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
+						p_predict22 = p_estimate22 + powf(CON_T,2)*Q;
+
+						//update
+						//z_predict = z - C*x_predict
+						//z_predict = theta_error
+						//z = sensor_theta_input
+						//C = [0 1]
+						z_predict = Velocity_Now_Rad - omega_predict;
+
+						//S = C*p_predict*transpose(C) + R
+						//R = Sigma_w^2
+						R = powf(Sigma_w,2);
+						s = p_predict22 + R;
+
+						//K = p_predict*transpose(C)*inv(S)
+						//K = [k11;k21]
+						k11 = p_predict12/s;
+						k21 = p_predict22/s;
+
+						//x_estimate = x_predict + K*z_predict
+						theta_estimate = theta_predict + k11*z_predict;
+						omega_estimate = omega_predict + k21*z_predict;
+
+						//p_estimate = (I - K*C)*p_predict
+						//I = [1 0; 0 1]
+						p_estimate11 = (p_predict11*(p_predict22+R)-p_predict12*p_predict21)/s;
+						p_estimate12 = p_predict12*R/s;
+						p_estimate21 = p_predict21*R/s;
+						p_estimate22 = p_predict22*R/s;
+
+						if (angle_rad_start < angle_rad_stop)
+						{
+							position_kd = 0;
+							position_ki = 0;
+							position_kp = 0.25;
+							velocity_kd = 0;
+							velocity_ki = 6000;
+							velocity_kp = 8000;
+						}
+						else
+						{
+							position_kd = 0;
+							position_ki = 0;
+							position_kp = 0.5;
+							velocity_kd = 0;
+							velocity_ki = 1500;
+							velocity_kp = 4000;
+						}
+						//position control
+						error_position = desired_position - Position_Now_Rad;
+						error_position_diff = (error_position - error_position_prev)*1000.0;
+						error_position_int = error_position_int + error_position/1000.0;
+						command_velocity = position_kp*error_position + position_ki*error_position_int + position_kd*error_position_diff + position_bias;
+						error_position_prev = error_position;
+
+				//		limitter velocity
+						if (command_velocity > 1)
+						{
+							command_velocity = 1;
+						}
+						else if (command_velocity < -1)
+						{
+							command_velocity = -1;
+						}
+
+						//velocity control
+						error_velocity = desired_velocity - omega_estimate + command_velocity;
+						error_velocity_diff = (error_velocity - error_velocity_prev)*1000.0;
+						error_velocity_int = error_velocity_int + error_velocity/1000.0;
+						PWM_Out = velocity_kp*error_velocity + velocity_ki*error_velocity_int + velocity_kd*error_velocity_diff + velocity_bias;
+						error_velocity_prev = error_velocity;
+
+				//		if ((PWM_Out > 200) || (PWM_Out < -200) )
+				//		{
+				//			if (PWM_Out > PWM_Out_Pre + 5)
+				//			{
+				//				PWM_Out = PWM_Out_Pre + 5;
+				//			}
+				//			else if (PWM_Out < PWM_Out_Pre - 5)
+				//			{
+				//				PWM_Out = PWM_Out_Pre - 5;
+				//			}
+				//		}
+
+						//limitter pwm
+						if (PWM_Out > 10000)
+						{
+							PWM_Out = 10000;
+						}
+						else if (PWM_Out < -10000)
+						{
+							PWM_Out = -10000;
+						}
+
+				//		if (tau < tau_max/2)
+				//		{
+				//			if (PWM_Out < 0)
+				//			{
+				//				PWM_Out = -PWM_Out;
+				//			}
+				//		}
+
+						//control motor direction
+						if (PWM_Out < 0)
+//						if (angle_rad_start > angle_rad_stop)
+						{
+							__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
+							HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_RESET);
+						}
+				//		else if (PWM_Out >= 0)
+						else
+						{
+							__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
+							HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_SET);
+						}
+
+					}
+				}
+			}
 
 
 //			if(NO_KALMAN)
@@ -1041,36 +1176,117 @@ float Encoder_Velocity_Update()  //Lecture code DON'T TOUCH!
 	//Save Last state
 	static uint32_t EncoderLastPosition = 0;
 	static uint64_t EncoderLastTimestamp = 0;
+//	static uint32_t EncoderLastOffset = 0;
 
 	//read data
-	uint32_t EncoderNowPosition = htim1.Instance->CNT; //pulse
+//	uint32_t EncoderNowPosition = htim1.Instance->CNT; //pulse
+	uint32_t EncoderNowPosition = Encoder_Position_Update(); //use position from unwarp
 	uint64_t EncoderNowTimestamp = micros();
+//	uint32_t EncoderNowOffset = 0;
 
 	int32_t EncoderPositionDiff;
 	uint64_t EncoderTimeDiff;
 
 	EncoderTimeDiff = EncoderNowTimestamp - EncoderLastTimestamp;
 	EncoderPositionDiff = EncoderNowPosition - EncoderLastPosition;
+	if (clear_counter_velocity == 1)
+	{
+		clear_counter_velocity = 0;
+		EncoderNowPosition = 0;
+		EncoderLastPosition = 0;
+	}
 
 	//compensate overflow and underflow
-	if (EncoderPositionDiff >= Encoder_Overflow)
-	{
-		EncoderPositionDiff -= Encoder_Resolution;
-		//EncoderPositionDiff -= 57344;
-	}
-	else if (-EncoderPositionDiff >= Encoder_Overflow)
-	{
-		EncoderPositionDiff += Encoder_Resolution;
-		//EncoderPositionDiff += 57344;
-	}
+//	if (EncoderPositionDiff >= Encoder_Overflow)
+//	{
+//		EncoderPositionDiff -= Encoder_Resolution;
+//
+//		//write new unwrapping
+////		EncoderNowOffset = EncoderLastOffset - Encoder_Resolution;
+////		EncoderPositionDiff = EncoderPositionDiff + EncoderNowOffset;
+//		//EncoderPositionDiff -= 57344;
+//	}
+//	else if (-EncoderPositionDiff >= Encoder_Overflow)
+//	{
+//		EncoderPositionDiff += Encoder_Resolution;
+//
+////		write new unwrap
+////		EncoderNowOffset = EncoderLastOffset + Encoder_Resolution;
+////		EncoderPositionDiff = EncoderPositionDiff + EncoderNowOffset;
+//		//EncoderPositionDiff += 57344;
+//	}
 
 	//Update Position and time
 	EncoderLastPosition = EncoderNowPosition;
 	EncoderLastTimestamp = EncoderNowTimestamp;
+//	EncoderLastOffset = EncoderNowOffset;
 
 	//Calculate velocity
 	//EncoderTimeDiff is in uS
 	return (EncoderPositionDiff * 1000000) / (float) EncoderTimeDiff;
+}
+
+
+float Encoder_Position_Update()  //Lecture code DON'T TOUCH!
+{
+	//Save Last state
+	//read data
+	static uint32_t EncoderPreviousPosition = 0;
+	uint32_t EncoderCurrentPosition = 0;
+	int32_t EncoderPositionDifferent;
+	int32_t EncoderUnwrapPosition ;
+	static uint32_t EncoderPreviousOffset = 0;
+	static uint32_t EncoderCurrentOffset = 0;
+
+	EncoderCurrentPosition = htim1.Instance->CNT; //pulse
+
+	//delta position = current - previous
+	EncoderPositionDifferent = EncoderCurrentPosition - EncoderPreviousPosition;
+	//signal = current + current offset
+	EncoderUnwrapPosition = EncoderCurrentPosition + EncoderCurrentOffset;
+
+	if (clear_counter_position == 1)
+	{
+		clear_counter_position = 0;
+		EncoderPreviousPosition = 0;
+		EncoderCurrentPosition = 0;
+		EncoderPreviousOffset = 0;
+		EncoderCurrentOffset = 0;
+		EncoderUnwrapPosition = 0;
+		EncoderPositionDifferent = 0;
+	}
+
+	//compensate overflow and underflow
+	if (EncoderPositionDifferent >= Encoder_Overflow)
+	{
+//		EncoderPositionDiff -= Encoder_Resolution;
+//		EncoderUnwrapPosition = EncoderCurrentPosition - Encoder_Resolution;
+
+//		write new unwrapping
+		//current offset = previous offset - resolution of encoder max
+		EncoderCurrentOffset = EncoderPreviousOffset - Encoder_Resolution;
+		//signal = current + current offset
+		EncoderUnwrapPosition = EncoderCurrentPosition + EncoderCurrentOffset;
+//		EncoderPositionDiff -= 57344;
+	}
+	else if (-EncoderPositionDifferent >= Encoder_Overflow)
+	{
+//		EncoderPositionDiff += Encoder_Resolution;
+//		EncoderUnwrapPosition = EncoderCurrentPosition + Encoder_Resolution;
+
+//		write new unwrap
+		EncoderCurrentOffset = EncoderPreviousOffset + Encoder_Resolution;
+		EncoderUnwrapPosition = EncoderCurrentPosition + EncoderCurrentOffset;
+//		EncoderPositionDiff += 57344;
+	}
+
+	//Update Position and time
+	EncoderPreviousPosition = EncoderCurrentPosition;
+	EncoderPreviousOffset = EncoderCurrentOffset;
+
+	//Calculate velocity
+	//EncoderTimeDiff is in uS
+	return EncoderUnwrapPosition  ;
 }
 
 #define PWM_CHANNEL TIM_CHANNEL_4			//Set channel for PWM
@@ -1099,30 +1315,211 @@ void Motor_Drive_PWM()	//Motor drive
 	}
 }
 
+void quintic()
+{
+	if (initial == 1 && angle_rad_stop - angle_rad_start != 0)
+	{
+		//calculate tau
+		//short if condition
+		tau_max = 15/8*(angle_rad_stop - angle_rad_start)/omega_max >= sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max)) ? 15/8*(angle_rad_stop - angle_rad_start)/omega_max : sqrtf(abs(((10*powf(3+sqrtf(3),1))-(5*powf(3+sqrtf(3),2))+(5*powf(3+sqrtf(3),3)/9))*(angle_rad_stop-angle_rad_start)/alpha_max));
+
+		//calculate coeffient
+		c_0 = angle_rad_start;
+		c_1 = 0;
+		c_2 = 0;
+		c_3 = 10*((angle_rad_stop - angle_rad_start)/(powf(tau_max,3)));
+		c_4 = 15*((angle_rad_start - angle_rad_stop)/(powf(tau_max,4)));
+		c_5 = 6*((angle_rad_stop - angle_rad_start)/(powf(tau_max,5)));
+		//save initial time
+		//change microsec to second
+		time_initial = micros()/1000000.0;
+		initial = 0;
+
+		//initial parameter in kalman filter
+		theta_estimate = angle_rad_start;
+		omega_estimate = 0;
+		p_estimate11 = 1 ;
+		p_estimate12 = 0 ;
+		p_estimate21 = 0 ;
+		p_estimate22 = 1 ;
+
+	}
+	if (initial == 0 && angle_rad_stop - angle_rad_start != 0)
+	{
+		//at the final point
+		//tau = (micros()/1000000.0)-time_initial ; in second unit
+		if ((micros()/1000000.0)-time_initial >= tau_max)
+		{
+			initial = 1;
+			angle_rad_start = angle_rad_stop;
+			PWM_Out = 0;
+			__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, PWM_Out);
+			error_position = 0;
+			error_position_diff = 0;
+			error_position_int = 0;
+			error_position_prev = 0;
+			error_velocity = 0;
+			error_velocity_diff = 0;
+			error_velocity_int = 0;
+			error_velocity_prev = 0;
+		}
+		else //on going to final point
+		{
+			//tau = real time - initial time (duration in second unit)
+			tau = micros()/1000000.0 - time_initial;
+			desired_position = c_0*powf(tau,0) + c_1*powf(tau,1) + c_2*powf(tau,2) + c_3*powf(tau,3) + c_4*powf(tau,4) + c_5*powf(tau,5);
+			desired_velocity = 0 + c_1 + 2*c_2*powf(tau,1) + 3*c_3*powf(tau,2) + 4*c_4*powf(tau,3) + 5*c_5*powf(tau,4);
+
+			//kalman filter
+			Kalman_Filter();
+
+			//cascade control
+			cascade_control_with_feed_forward();
+		}
+	}
+}
+
 void Kalman_Filter()
 {
-	Q = powf(Sigma_a, 2);
-	R = powf(Sigma_w, 2);
+	//predict state
+	//x_predict = A*x_estimate
+	//x_predict = [theta_predict; omega_predict]
+	//A = [1 dt; 0 1]
+	//x_estimate = [theta_estimate; omega_estimate]
+	theta_predict = theta_estimate + omega_estimate*CON_T;
+	omega_predict = omega_estimate;
 
-	float Position_Kalman_New = Position_Kalman + (Velocity_Kalman*CON_T);
-	float Velocity_Kalman_New = 0 + Velocity_Kalman;
-	float ye = Velocity_Now_Rad - Velocity_Kalman_New;
+	//p_predict = A*p_estimate*transpose(A) + G*Q*transpose(G)
+	//p_predict = [p_predict11 p_predict12 ; p_predict21 p_predict22]
+	//p_estimate = [p_estimate11 p_estimate12 ; p_estimate21 p_estimate22] -> initial [1 0; 0 1]
+	//G = [0.5*dt^2 ; dt]
+	//Q = Sigma_a^2
+	Q = powf(Sigma_a,2);
+	p_predict11 = p_estimate11 + (p_estimate12 + p_estimate21)*CON_T + p_estimate22*powf(CON_T,2)+powf(CON_T,4)*Q/4.0;
+	p_predict12 = p_estimate12 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
+	p_predict21 = p_estimate21 + p_estimate22*CON_T + powf(CON_T,3)*Q/2.0;
+	p_predict22 = p_estimate22 + powf(CON_T,2)*Q;
 
-	p11 = p11 + (CON_T*p21) + (Q*powf(fabs(CON_T),4))/4 + (powf(fabs(CON_T),2)*(p12 + CON_T*p22))/CON_T;
-	p12 = p12 + (CON_T*p22) + (Q*CON_T*powf(fabs(CON_T),2))/2;
-	p21 = (2*CON_T*p21 + Q*powf(fabs(CON_T),4) + 2*p22*powf(fabs(CON_T),2))/(2*CON_T);
-	p22 = Q*powf(fabs(CON_T),2) + p22;
+	//update
+	//z_predict = z - C*x_predict
+	//z_predict = theta_error
+	//z = sensor_theta_input
+	//C = [0 1]
+	z_predict = Velocity_Now_Rad - omega_predict;
 
-	Position_Kalman_New = Position_Kalman_New + (p12*ye)/(R+p22);
-	Velocity_Kalman_New = Velocity_Kalman_New + (p22*ye)/(R+p22);
+	//S = C*p_predict*transpose(C) + R
+	//R = Sigma_w^2
+	R = powf(Sigma_w,2);
+	s = p_predict22 + R;
 
-	p11 = p11 - (p12*p21)/(R+p22);
-	p12 = p12 - (p12*p22)/(R+p22);
-	p21 = -p21*(p22/(R+22)-1);
-	p22 = -p22*(p22/(R+22)-1);
+	//K = p_predict*transpose(C)*inv(S)
+	//K = [k11;k21]
+	k11 = p_predict12/s;
+	k21 = p_predict22/s;
 
-	Position_Kalman = Position_Kalman_New;
-	Velocity_Kalman = Velocity_Kalman_New;
+	//x_estimate = x_predict + K*z_predict
+	theta_estimate = theta_predict + k11*z_predict;
+	omega_estimate = omega_predict + k21*z_predict;
+
+	//p_estimate = (I - K*C)*p_predict
+	//I = [1 0; 0 1]
+	p_estimate11 = (p_predict11*(p_predict22+R)-p_predict12*p_predict21)/s;
+	p_estimate12 = p_predict12*R/s;
+	p_estimate21 = p_predict21*R/s;
+	p_estimate22 = p_predict22*R/s;
+
+//	Q = powf(Sigma_a, 2);
+//	R = powf(Sigma_w, 2);
+//
+//	float Position_Kalman_New = Position_Kalman + (Velocity_Kalman*CON_T);
+//	float Velocity_Kalman_New = 0 + Velocity_Kalman;
+//	float ye = Velocity_Now_Rad - Velocity_Kalman_New;
+//
+//	p11 = p11 + (CON_T*p21) + (Q*powf(fabs(CON_T),4))/4 + (powf(fabs(CON_T),2)*(p12 + CON_T*p22))/CON_T;
+//	p12 = p12 + (CON_T*p22) + (Q*CON_T*powf(fabs(CON_T),2))/2;
+//	p21 = (2*CON_T*p21 + Q*powf(fabs(CON_T),4) + 2*p22*powf(fabs(CON_T),2))/(2*CON_T);
+//	p22 = Q*powf(fabs(CON_T),2) + p22;
+//
+//	Position_Kalman_New = Position_Kalman_New + (p12*ye)/(R+p22);
+//	Velocity_Kalman_New = Velocity_Kalman_New + (p22*ye)/(R+p22);
+//
+//	p11 = p11 - (p12*p21)/(R+p22);
+//	p12 = p12 - (p12*p22)/(R+p22);
+//	p21 = -p21*(p22/(R+22)-1);
+//	p22 = -p22*(p22/(R+22)-1);
+//
+//	Position_Kalman = Position_Kalman_New;
+//	Velocity_Kalman = Velocity_Kalman_New;
+}
+
+void cascade_control_with_feed_forward()
+{
+	if (angle_rad_start < angle_rad_stop)
+	{
+		position_kd = 0;
+		position_ki = 0;
+		position_kp = 0.25;
+		velocity_kd = 0;
+		velocity_ki = 6000;
+		velocity_kp = 8000;
+	}
+	else
+	{
+		position_kd = 0;
+		position_ki = 0;
+		position_kp = 0.5;
+		velocity_kd = 0;
+		velocity_ki = 1500;
+		velocity_kp = 3000;
+	}
+
+	//position control
+	error_position = desired_position - Position_Now_Rad;
+	error_position_diff = (error_position - error_position_prev)*1000.0;
+	error_position_int = error_position_int + error_position/1000.0;
+	command_velocity = position_kp*error_position + position_ki*error_position_int + position_kd*error_position_diff + position_bias;
+	error_position_prev = error_position;
+
+	//					limitter velocity
+	if (command_velocity > 1)
+	{
+		command_velocity = 1;
+	}
+	else if (command_velocity < -1)
+	{
+		command_velocity = -1;
+	}
+
+	//velocity control
+	error_velocity = desired_velocity - omega_estimate + command_velocity;
+	error_velocity_diff = (error_velocity - error_velocity_prev)*1000.0;
+	error_velocity_int = error_velocity_int + error_velocity/1000.0;
+	PWM_Out = velocity_kp*error_velocity + velocity_ki*error_velocity_int + velocity_kd*error_velocity_diff + velocity_bias;
+	error_velocity_prev = error_velocity;
+
+	//limitter pwm
+	if (PWM_Out > 10000)
+	{
+		PWM_Out = 10000;
+	}
+	else if (PWM_Out < -10000)
+	{
+		PWM_Out = -10000;
+	}
+
+
+	//control motor direction
+	if (PWM_Out < 0)
+//	if (angle_rad_start > angle_rad_stop)
+	{
+		__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_RESET);
+	}
+	else
+	{
+		__HAL_TIM_SET_COMPARE(&htim3, PWM_CHANNEL, abs(PWM_Out));
+		HAL_GPIO_WritePin(GPIOB, GPIO_PIN_DIRECTION, GPIO_PIN_SET);
+	}
 }
 
 void Velocity_Control()  //Velocity Control PID
